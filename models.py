@@ -1,17 +1,3 @@
-#   Copyright 2019 Takenori Yamamoto
-#
-#   Licensed under the Apache License, Version 2.0 (the "License");
-#   you may not use this file except in compliance with the License.
-#   You may obtain a copy of the License at
-#
-#       http://www.apache.org/licenses/LICENSE-2.0
-#
-#   Unless required by applicable law or agreed to in writing, software
-#   distributed under the License is distributed on an "AS IS" BASIS,
-#   WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
-#   See the License for the specific language governing permissions and
-#   limitations under the License.
-"""Definitions of Neural Network Models for CGNN."""
 import sys
 import torch
 import time
@@ -53,6 +39,8 @@ def get_activation(name):
         return CELU(alpha)
     elif act_name == 'sigmoid':
         return Sigmoid()
+    elif act_name == 'tanh':
+        return Tanh()
     else:
         raise NameError("Not supported activation: {}".format(name))
 
@@ -117,7 +105,6 @@ class Model(object):
     def __init__(self, device, model, name, optimizer, scheduler, clip_value=None,
                  metrics=[('loss', nn.MSELoss()), ('mae', nn.L1Loss())]):
         self.name=name
-        #self.model=torch.nn.DataParallel(model).to(device)
         self.model=model.to(device)
         self.optimizer = optimizer
         self.scheduler = scheduler
@@ -132,7 +119,6 @@ class Model(object):
             self.model.eval()   # Set model to evaluate mode
 
     def _process_batch(self, input, targets, phase):
-        #input = input.to(self.device)
         
         nodes=input.nodes.to(self.device)
         edge_sources=input.edge_sources.to(self.device)
@@ -146,10 +132,8 @@ class Model(object):
         self.optimizer.zero_grad()
 
         with torch.set_grad_enabled(phase == 'train'):
-            outputs = self.model(nodes,edge_sources,edge_targets,edge_distance,graph_indices,node_counts,combine_sets,plane_wave) #Caught RuntimeError in replica 1 on device 1
-            #outputs = self.model(input)
+            outputs = self.model(nodes,edge_sources,edge_targets,edge_distance,graph_indices,node_counts,combine_sets,plane_wave) 
             metric_tensors = [metric.add_batch_metric(outputs, targets) for metric in self.metrics]
-            # backward + optimize only if in training phase
             if phase == 'train':
                 loss = metric_tensors[0]
                 loss.backward()
@@ -169,7 +153,7 @@ class Model(object):
             epoch_since = time.time()
             print('Epoch {}/{}'.format(epoch, num_epochs - 1), flush=True)
 
-            self.scheduler.step()
+            #self.scheduler.step()
             print('current lr:', self.optimizer.param_groups[0]['lr'])
 
             train_val_metrics = []
@@ -189,6 +173,8 @@ class Model(object):
                     checkpoint.check(metric)
 
                 train_val_metrics += [('_'.join([phase, name]), metric) for name, metric in epoch_metrics]
+            self.scheduler.step()
+
             history.write(epoch, train_val_metrics)
             time_elapsed = time.time() - epoch_since
             print('Elapsed time (sec.): {:.3f}'.format(time_elapsed))
@@ -211,9 +197,8 @@ class Model(object):
         # Iterate over data.
         all_outputs = []
         all_targets = []
+        all_graph_vec = []
         for input, targets in dataloader:
-            #input = input.to(self.device)
-            #targets = targets.to(self.device)
 
             nodes=input.nodes.to(self.device)
             edge_sources=input.edge_sources.to(self.device)
@@ -226,15 +211,18 @@ class Model(object):
             targets = targets.to(self.device)        
             
             with torch.set_grad_enabled(False):
-                outputs = self.model(nodes,edge_sources,edge_targets,edge_distance,graph_indices,node_counts,combine_sets,plane_wave)
+                outputs,graph_vec = self.model(nodes,edge_sources,edge_targets,edge_distance,graph_indices,node_counts,combine_sets,plane_wave,output_graph=True)
 
             outputs = outputs.to(torch.device("cpu")).numpy()
             targets = targets.to(torch.device("cpu")).numpy()
+            graph_vec = graph_vec.to(torch.device("cpu")).numpy()
             all_outputs.append(outputs)
             all_targets.append(targets)
+            all_graph_vec.append(graph_vec)
 
         all_outputs = np.concatenate(all_outputs)
         all_targets = np.concatenate(all_targets)
+        all_graph_vec = np.concatenate(all_graph_vec)
 
         all_outputs = torch.FloatTensor(all_outputs).to(self.device)
         all_targets = torch.FloatTensor(all_targets).to(self.device)
@@ -246,7 +234,7 @@ class Model(object):
         all_outputs = all_outputs.to(torch.device("cpu")).numpy()
         all_targets = all_targets.to(torch.device("cpu")).numpy()
 
-        return all_outputs, all_targets
+        return all_outputs, all_targets, all_graph_vec
 
     def save(self, model_path="model"):
         model_path="model/model_{}.pth".format(self.name)
@@ -274,22 +262,6 @@ def _bn_act(num_features, activation, use_batch_norm=False):
     else:
         return activation
 
-class BatchNormBilinear(Module):
-    """
-    Batch Norm Bilinear layer
-    """
-    def __init__(self, bilinear):
-        super(BatchNormBilinear, self).__init__()
-        self.in1_features = bilinear.in1_features
-        self.in2_features = bilinear.in2_features
-        self.out_features = bilinear.out_features
-        self.bn = BatchNorm1d(self.out_features)
-        self.bilinear = bilinear
-
-    def forward(self, input1, input2):
-        output = self.bn(self.bilinear(input1, input2))
-        return output
-
 class NodeEmbedding(Module):
     """
     Node Embedding layer
@@ -301,9 +273,6 @@ class NodeEmbedding(Module):
         self.activation = _bn_act(out_features, activation, use_batch_norm)
 
     def forward(self, input):
-        #print('In forward data: ',input.device)
-        #print('In forward embedding linear : ',next(self.linear.parameters())[0].device)
-        #print('In forward embedding activation : ',list(self.activation))
         output=self.linear(input)
         output = self.activation(output)
         return output
@@ -314,10 +283,8 @@ class OLP(Module):
                 use_batch_norm=False, bias=False):
         # One layer Perceptron
         super(OLP, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
         self.linear = Linear(in_features, out_features, bias=bias)
-        self.activation = _bn_act(self.out_features, activation, use_batch_norm)
+        self.activation = _bn_act(out_features, activation, use_batch_norm)
 
     def forward(self,  input):
         z = self.linear(input)
@@ -330,46 +297,36 @@ class Gated_pooling(Module):
     def __init__(self, in_features, out_features, activation=ELU(),
                  use_batch_norm=False, bias=False):
         super(Gated_pooling, self).__init__()
-        self.in_features = in_features
-        self.out_features = out_features
-        self.linear1 = Linear(in_features, in_features, bias=bias)
-        self.activation1 = _bn_act(self.in_features, activation, use_batch_norm)
+        self.linear1 = Linear(in_features, out_features, bias=bias)
+        self.activation1 = _bn_act(out_features, activation, use_batch_norm)
         self.linear2 = Linear(in_features, out_features, bias=bias)
-        self.activation2 = _bn_act(self.out_features, activation, use_batch_norm)
+        self.activation2 = _bn_act(out_features, activation, use_batch_norm)
 
     def forward(self,  input,graph_indices,node_counts):
 
-        z = self.activation1(self.linear1(input))
+        z = self.activation1(self.linear1(input))*self.linear2(input)
         graphcount=len(node_counts)
         device=z.device
         blank=torch.zeros(graphcount,z.shape[1]).to(device)
-        blank.index_add_(0, graph_indices, z*self.linear2(input))/node_counts.unsqueeze(1)
+        blank.index_add_(0, graph_indices, z)/node_counts.unsqueeze(1)
         #output = self.activation2(self.linear2(blank)) ################对每个图加起来
         return blank
  
 
 class GatedGraphConvolution(Module):
-    """
-    Gated Graph Convolution layer
-                use_node_batch_norm=use_node_batch_norm,
-                use_edge_batch_norm=use_edge_batch_norm,
-                bias=conv_bias,
-                conv_type=conv_type,
-                MLPnet=n2v_MLP
-    """
-    def __init__(self,n_node_feat, in_features, out_features, N_shbf ,N_srbf, gate_activation=Sigmoid(),
+    def __init__(self,n_node_feat, in_features, out_features, N_shbf ,N_srbf,n_grid_K,n_Gaussian, gate_activation=Sigmoid(),
                  use_node_batch_norm=False, use_edge_batch_norm=False,
                  bias=False, conv_type=0, MLP_activation=ELU()):
         super(GatedGraphConvolution, self).__init__()
-        k1= N_shbf*N_srbf # k is the number of basis
-        k2=26
+        k1= n_Gaussian # k is the number of basis
+        k2=n_grid_K**3
         self.linear1_vector = Linear(k1, out_features, bias=bias) # linear for combine sets
         self.linear1_vector_gate = Linear(k1, out_features, bias=bias) # linear for combine sets
         self.activation1_vector_gate = _bn_act(out_features, gate_activation, use_edge_batch_norm)
         self.linear2_vector = Linear(k2, out_features, bias=bias) # linear for plane waves
-        self.linear2_vector_gate = Linear(k2, out_features, bias=bias) # linear for plane waves
-        self.activation2_vector_gate = _bn_act(out_features, gate_activation, use_edge_batch_norm)
- 
+        self.linear2_vector_gate = Linear(k2, k2, bias=bias) # linear for plane waves
+        self.activation2_vector_gate = _bn_act(k2, gate_activation, use_edge_batch_norm)
+
         self.linear_gate = Linear(in_features, out_features, bias=bias)
         self.activation_gate = _bn_act(out_features, gate_activation, use_edge_batch_norm)
 
@@ -377,23 +334,25 @@ class GatedGraphConvolution(Module):
         self.activation_MLP = _bn_act(out_features, MLP_activation, use_edge_batch_norm)
 
    
-    #def forward(self, input, edge_sources, edge_targets, rij,alphaij,edge_vector , edge_index, combine_sets, dis_one_hot, alphaij_one_hot):
-    def forward(self, input,nodes, edge_sources, edge_targets, rij ,combine_sets,plane_wave):
+    def forward(self, input,nodes, edge_sources, edge_targets, rij ,combine_sets,plane_wave,cutoff):
 
         ni = input[edge_sources].contiguous()
         nj = input[edge_targets].contiguous()
         rij=rij.unsqueeze(1).contiguous()
-        delta= (nj-ni)/rij
+        mask=rij<cutoff
+        delta= (ni-nj)/rij
         final_fe=torch.cat([ni,nj,delta],dim=1)
         del ni,nj,delta
         torch.cuda.empty_cache()
-
+ 
         e_gate = self.activation_gate(self.linear_gate(final_fe))
         e_MLP = self.activation_MLP(self.linear_MLP(final_fe))
 
         z1 = self.linear1_vector(combine_sets)
-        z2 = self.linear2_vector(plane_wave)*self.activation2_vector_gate(self.linear2_vector_gate(plane_wave))
-        z =  e_gate * e_MLP * (z1+z2)
+        gate=self.activation2_vector_gate(self.linear2_vector_gate(plane_wave))
+        z2 = self.linear2_vector(plane_wave*gate)
+        z =  e_gate * e_MLP * (z1+z2) * mask
+        #z =  e_gate * e_MLP * mask
         del z1,z2,e_gate,e_MLP
         torch.cuda.empty_cache()
         output = input.clone()
@@ -401,41 +360,27 @@ class GatedGraphConvolution(Module):
         
         return output
 
-class DFTGN_AtomGraph(nn.Module):
-    """
-    Gated Graph Neural Networks
+class geo_CGNN(nn.Module):
+    def __init__(self,n_node_feat, n_hidden_feat,n_GCN_feat,conv_bias,N_block,node_activation, MLP_activation,use_node_batch_norm,use_edge_batch_norm, N_shbf ,N_srbf, cutoff,max_nei,n_MLP_LR,n_grid_K,n_Gaussian):
 
-    Nodes -> Embedding(初始化电子密度向量) -> block( Gated Convolutions2(Vxc) -> Attention GN -> gated Agg ->softmax) -> Graph Pooling -> Full Connections -> Linear Regression
-
-    """
-    def __init__(self,n_node_feat, n_hidden_feat,n_GCN_feat,conv_bias,N_block,node_activation, MLP_activation,use_node_batch_norm,use_edge_batch_norm, N_shbf ,N_srbf, cutoff,max_nei,n_MLP_LR):
-
-        super(DFTGN_AtomGraph, self).__init__()
-        #self.device=device
+        super(geo_CGNN, self).__init__()
+        self.cutoff=cutoff
         self.N_block=N_block
         node_activation=get_activation(node_activation)
         MLP_activation=get_activation(MLP_activation)
-
-        ##############
-        n_GCN_feat=n_hidden_feat
-        ##############
-
-        #self.embedding = NodeEmbedding(n_node_feat, n_hidden_feat)
         self.embedding = NodeEmbedding(n_node_feat, n_hidden_feat)
-
-        #𝑉=(𝑛)+∑𝜎((𝑛_𝑖)W1⊙ML𝑃((𝑛_𝑖,𝑊2)
         n2v_concatent_feat = n_hidden_feat*3 #ni+nj+delta
 
-        self.conv = [GatedGraphConvolution(n_node_feat,n2v_concatent_feat, n_GCN_feat, N_shbf ,N_srbf,
+        self.conv = [GatedGraphConvolution(n_node_feat,n2v_concatent_feat, n_hidden_feat, N_shbf ,N_srbf,n_grid_K,n_Gaussian,
                 gate_activation=node_activation, # sigmoid
-                MLP_activation=MLP_activation, # Elu
+                MLP_activation=MLP_activation, # Elu >1
                 use_node_batch_norm=use_node_batch_norm,
                 use_edge_batch_norm=use_edge_batch_norm,
                 bias=conv_bias)]
 
-        self.MLP_psi2n=[OLP(n_GCN_feat, n_hidden_feat, activation=MLP_activation, use_batch_norm=use_node_batch_norm, bias=conv_bias)]
+        self.MLP_psi2n=[OLP(n_hidden_feat, n_hidden_feat, activation=MLP_activation, use_batch_norm=use_node_batch_norm, bias=conv_bias)]
 
-        self.conv += [GatedGraphConvolution(n_node_feat,n2v_concatent_feat, n_hidden_feat, N_shbf ,N_srbf,
+        self.conv += [GatedGraphConvolution(n_node_feat,n2v_concatent_feat, n_hidden_feat, N_shbf ,N_srbf,n_grid_K,n_Gaussian,
                 gate_activation=node_activation,
                 MLP_activation=MLP_activation,
                 use_node_batch_norm=use_node_batch_norm,
@@ -443,35 +388,39 @@ class DFTGN_AtomGraph(nn.Module):
                 bias=conv_bias) for _ in range(N_block-1)]
         self.conv=ModuleList(self.conv)
 
-        
-        #################changed
-        self.MLP_psi2n = [OLP(n_GCN_feat, n_hidden_feat, activation=MLP_activation, use_batch_norm=use_node_batch_norm, bias=conv_bias) for _ in range(N_block)]
-
+        self.MLP_psi2n = [OLP(n_hidden_feat, n_hidden_feat, activation=MLP_activation, use_batch_norm=use_node_batch_norm, bias=conv_bias) for _ in range(N_block)]
         self.MLP_psi2n=ModuleList(self.MLP_psi2n)
         
         # gated pooling for every block
-        ###############changed
-        self.gated_pooling=[Gated_pooling(n_GCN_feat, n_GCN_feat, activation=MLP_activation ,use_batch_norm=use_node_batch_norm, bias=conv_bias) for _ in range(N_block)]
+        self.gated_pooling=[Gated_pooling(n_hidden_feat, n_GCN_feat, activation=MLP_activation ,use_batch_norm=use_node_batch_norm, bias=conv_bias) for _ in range(N_block)]
         self.gated_pooling=ModuleList(self.gated_pooling)
-
-        # linear regression
+        
+        # final linear regression
+        self.linear_regression=[OLP(int(n_GCN_feat/2**(i-1)), int(n_GCN_feat/2**i) , activation=MLP_activation, use_batch_norm=use_node_batch_norm, bias=conv_bias) for i in range(1,n_MLP_LR)]
+        self.linear_regression += [OLP(int(n_GCN_feat/2**(n_MLP_LR-1)), 1 , activation=None, use_batch_norm=None, bias=conv_bias)]
+        self.linear_regression=ModuleList(self.linear_regression)
+        '''
+        # final linear regression
         self.linear_regression=[OLP(int(n_GCN_feat/i), int(n_GCN_feat/(i+1)) , activation=MLP_activation, use_batch_norm=use_node_batch_norm, bias=conv_bias) for i in range(1,n_MLP_LR)]
         self.linear_regression += [OLP(int(n_GCN_feat/n_MLP_LR), 1 , activation=None, use_batch_norm=None, bias=conv_bias)]
-        self.linear_regression=ModuleList(self.linear_regression)
-
+        self.linear_regression=ModuleList(self.linear_regression) 
+        '''
     
-    def forward(self,nodes,edge_sources,edge_targets,edge_distance,graph_indices,node_counts,combine_sets,plane_wave):
-        #print('before embedding: ',input.nodes.device)
-        x = self.embedding(nodes) #将输入的节点调整维度
+    def forward(self,nodes,edge_sources,edge_targets,edge_distance,graph_indices,node_counts,combine_sets,plane_wave,output_graph=False):
+        x = self.embedding(nodes) 
         Poolingresults=[]
         
         for i in range(self.N_block):
-            x = self.conv[i](x,nodes,  edge_sources, edge_targets,edge_distance,combine_sets,plane_wave)
+            x = self.conv[i](x,nodes,  edge_sources, edge_targets,edge_distance,combine_sets,plane_wave,self.cutoff)
 
             poo=self.gated_pooling[i](x,graph_indices,node_counts)
             Poolingresults.append(poo)
             x = self.MLP_psi2n[i](x)
-        x=torch.sum(torch.stack(Poolingresults),dim=0)
+        graph_vec=torch.sum(torch.stack(Poolingresults),dim=0)
+        y=graph_vec
         for lr in self.linear_regression:
-            x=lr(x)
-        return x.squeeze()
+            y=lr(y)
+        if output_graph:
+            return y.squeeze(),graph_vec
+        else:
+            return y.squeeze()
