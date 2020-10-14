@@ -1,3 +1,19 @@
+################################################
+'''
+This file is to extract all the information in need to construct the atom graph from .cif files
+input:
+--data_dir : the .cif file path, the cif files' name should be mp-XXXX or oqmd-XXXX
+--output_path 
+--name_database : MP or OQMD, 
+--cutoff : radius of neighbourhood
+--max_num_nbr : max numbers of neighbors
+--compress_ratio : percentage of data you want to use
+
+output:
+Several .npz files to store the name, lattice vector, nodes features ,neighbors , cell volume
+Will output to "output_path"
+'''
+################################################
 from __future__ import print_function, division
 from tqdm import tqdm
 import csv
