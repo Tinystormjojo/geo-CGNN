@@ -5,7 +5,7 @@ There are already several cif files for reference
 
 2. run AtomGraph.py to creat the model input data
 
-e.g. (for the mp-XX files) run:
+e.g. run:
 
 python AtomGraph.py --data_dir ./database/cif --name_database MP_test1 --cutoff 8 --max_num_nbr 12 --compress_ratio 1
 The compressed {name_database}+{cutoff}+{max_num_nbr}+{compress_ratio}.npz will be generated to the folder "./database/npz". Pls read the code for the details of the parameters 
