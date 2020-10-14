@@ -5,7 +5,7 @@
 The material used in our paper listed in files targets_XXX from the folder "./database"
 There are already several cif files for reference
 
-## 2. run AtomGraph.py to creat the model input data
+## 2. run AtomGraph.py to creat the input data of the model
 
 e.g. run:
 
