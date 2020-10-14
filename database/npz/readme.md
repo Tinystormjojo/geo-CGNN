@@ -1,2 +1,3 @@
-this folder is to store the .npz data
-the data will be created after you run the AtomGraph.py
+This folder is to store the .npz data
+The data will be created after you run the AtomGraph.py
+There is a pre_stored .npz file for reference
